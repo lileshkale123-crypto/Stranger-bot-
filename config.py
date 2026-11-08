@@ -30,3 +30,18 @@ REGIONS = [
 
 # Intro animation: seconds between frames (keep >= 0.6 to respect Telegram edit limits)
 INTRO_FRAME_DELAY = 0.8
+
+# Premium plans paid with Telegram Stars. Add a plan by adding a line here.
+PLANS = [
+    {"id": "d7", "days": 7, "stars": 50, "title": "7 Days"},
+    {"id": "d30", "days": 30, "stars": 150, "title": "30 Days"},
+    {"id": "d90", "days": 90, "stars": 350, "title": "90 Days"},
+]
+PLAN_BY_ID = {p["id"]: p for p in PLANS}
+
+# Matching
+FILTER_FALLBACK_SECONDS = 30  # offer "match with anyone" if a premium filter finds nobody
+
+# Anti-spam: max messages per window (seconds) while chatting
+RATE_LIMIT_MSGS = 6
+RATE_LIMIT_WINDOW = 4.0
