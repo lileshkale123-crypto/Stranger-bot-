@@ -29,7 +29,7 @@ async def on_error(event: ErrorEvent) -> bool:
 async def notify_restart(bot: Bot) -> None:
     """Matches live only in memory, so a redeploy ends them. Tell those users instead
     of leaving them chatting with nobody."""
-    uids = set(store.pairs) | set(store.queue)
+    uids = {u for u in (set(store.pairs) | set(store.queue)) if u > 0}
     for uid in uids:
         try:
             await asyncio.wait_for(bot.send_message(uid, T.t("bot_restarting")), timeout=3)

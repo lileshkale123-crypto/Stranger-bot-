@@ -1,33 +1,23 @@
-import asyncio
-import logging
-
+import asyncio, logging, random
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
-import db
-import keyboards as K
-import premium
-import texts as T
-from config import FILTER_FALLBACK_SECONDS, RATE_LIMIT_MSGS, RATE_LIMIT_WINDOW
+import ai_partner, db, keyboards as K, premium, texts as T
+from config import AI_MATCH_DELAY_MAX, AI_MATCH_DELAY_MIN, FILTER_FALLBACK_SECONDS, RATE_LIMIT_MSGS, RATE_LIMIT_WINDOW
 from store import store
 from util import safe_edit
 
 log = logging.getLogger(__name__)
 router = Router()
-
 _fallbacks: dict[int, asyncio.Task] = {}
-
-
-# ---------------------------------------------------------------- helpers
+_ai_fallbacks: dict[int, asyncio.Task] = {}
 
 def _registered(user) -> bool:
     return bool(user and user["gender"] and user["age_bracket"] and user["region"])
 
-
 async def _ready_user(message: Message):
-    """Return the user record if they can use the bot, else tell them why and return None."""
     user = await db.get_user(message.from_user.id)
     if not _registered(user):
         await message.answer(T.t("not_registered"))
@@ -37,15 +27,13 @@ async def _ready_user(message: Message):
         return None
     return user
 
-
 def _cancel_fallback(uid: int) -> None:
-    task = _fallbacks.pop(uid, None)
-    if task and not task.done():
-        task.cancel()
-
+    for d in (_fallbacks, _ai_fallbacks):
+        t = d.pop(uid, None)
+        if t and not t.done():
+            t.cancel()
 
 async def _fallback(bot: Bot, uid: int) -> None:
-    """After a while with no premium-filter match, offer to match with anyone."""
     try:
         await asyncio.sleep(FILTER_FALLBACK_SECONDS)
         if store.in_queue(uid):
@@ -57,6 +45,28 @@ async def _fallback(bot: Bot, uid: int) -> None:
     finally:
         _fallbacks.pop(uid, None)
 
+async def _ai_fallback(bot: Bot, uid: int, gender: str, want: str | None) -> None:
+    try:
+        await asyncio.sleep(random.uniform(AI_MATCH_DELAY_MIN, AI_MATCH_DELAY_MAX))
+        if not store.in_queue(uid):
+            return
+        if store.pair_ai(uid) is None:
+            return
+        ft = _fallbacks.pop(uid, None)
+        if ft and not ft.done():
+            ft.cancel()
+        try:
+            await bot.send_message(uid, T.t("match_found"), reply_markup=K.chat_menu())
+        except (TelegramForbiddenError, TelegramBadRequest):
+            store.end_chat(uid)
+            return
+        await ai_partner.start_session(bot, uid, gender, want)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception("AI fallback failed for %s", uid)
+    finally:
+        _ai_fallbacks.pop(uid, None)
 
 async def _announce(bot: Bot, a: int, b: int) -> None:
     _cancel_fallback(a)
@@ -65,7 +75,6 @@ async def _announce(bot: Bot, a: int, b: int) -> None:
         try:
             await bot.send_message(uid, T.t("match_found"), reply_markup=K.chat_menu())
         except (TelegramForbiddenError, TelegramBadRequest):
-            # this user blocked the bot: dissolve the pair and tell the other side
             store.end_chat(uid)
             try:
                 await bot.send_message(other, T.t("partner_left"), reply_markup=K.main_menu())
@@ -73,22 +82,18 @@ async def _announce(bot: Bot, a: int, b: int) -> None:
                 pass
             return
 
-
 async def _begin(bot: Bot, user, want: str | None) -> None:
     uid = user["id"]
     partner = store.enqueue(uid, user["gender"], want)
     if partner is not None:
         await _announce(bot, uid, partner)
         return
-    if want:
-        text = T.t("searching_filter", gender=want)
-    else:
-        text = T.t("searching_any")
+    text = T.t("searching_filter", gender=want) if want else T.t("searching_any")
     await bot.send_message(uid, text, reply_markup=K.main_menu())
+    _cancel_fallback(uid)
     if want:
-        _cancel_fallback(uid)
         _fallbacks[uid] = asyncio.create_task(_fallback(bot, uid))
-
+    _ai_fallbacks[uid] = asyncio.create_task(_ai_fallback(bot, uid, user["gender"], want))
 
 async def _search(message: Message, bot: Bot, want: str | None) -> None:
     user = await _ready_user(message)
@@ -106,51 +111,40 @@ async def _search(message: Message, bot: Bot, want: str | None) -> None:
         return
     await _begin(bot, user, want)
 
-
 async def _end_current(bot: Bot, uid: int) -> bool:
-    """Leave the current chat and tell the partner. Returns False if not in a chat."""
     partner = store.end_chat(uid)
     if partner is None:
         return False
+    if store.is_ai(partner):
+        ai_partner.cleanup_session(uid)
+        return True
     try:
         await bot.send_message(partner, T.t("partner_left"), reply_markup=K.main_menu())
     except (TelegramForbiddenError, TelegramBadRequest):
         pass
     return True
 
-
-# ---------------------------------------------------------------- menu
-
 @router.message(Command("menu"))
 async def menu(message: Message) -> None:
     in_chat = store.partner_of(message.from_user.id) is not None
-    await message.answer(
-        T.t("menu_open"), reply_markup=K.chat_menu() if in_chat else K.main_menu()
-    )
-
+    await message.answer(T.t("menu_open"), reply_markup=K.chat_menu() if in_chat else K.main_menu())
 
 @router.message(F.text == T.BTN_CLOSE)
 async def close_menu(message: Message) -> None:
     await message.answer(T.t("menu_closed"), reply_markup=ReplyKeyboardRemove())
-
-
-# ---------------------------------------------------------------- matching
 
 @router.message(F.text == T.BTN_RANDOM)
 @router.message(Command("search"))
 async def random_match(message: Message, bot: Bot) -> None:
     await _search(message, bot, None)
 
-
 @router.message(F.text == T.BTN_FIND_F)
 async def find_female(message: Message, bot: Bot) -> None:
     await _search(message, bot, "female")
 
-
 @router.message(F.text == T.BTN_FIND_M)
 async def find_male(message: Message, bot: Bot) -> None:
     await _search(message, bot, "male")
-
 
 @router.message(F.text == T.BTN_STOP)
 @router.message(F.text == T.BTN_LEAVE)
@@ -165,7 +159,6 @@ async def stop(message: Message, bot: Bot) -> None:
     else:
         await message.answer(T.t("nothing_to_stop"), reply_markup=K.main_menu())
 
-
 @router.message(F.text == T.BTN_NEXT)
 @router.message(Command("next"))
 async def next_stranger(message: Message, bot: Bot) -> None:
@@ -177,7 +170,6 @@ async def next_stranger(message: Message, bot: Bot) -> None:
     if store.dequeue(uid):
         _cancel_fallback(uid)
     await _begin(bot, user, None)
-
 
 @router.callback_query(F.data.startswith("mm:"))
 async def fallback_choice(cb: CallbackQuery, bot: Bot) -> None:
@@ -195,9 +187,6 @@ async def fallback_choice(cb: CallbackQuery, bot: Bot) -> None:
     await safe_edit(cb.message, T.t("matching_anyone"))
     await _begin(bot, user, None)
 
-
-# ---------------------------------------------------------------- report
-
 @router.message(F.text == T.BTN_REPORT)
 async def report(message: Message) -> None:
     partner = store.partner_of(message.from_user.id)
@@ -205,7 +194,6 @@ async def report(message: Message) -> None:
         await message.answer(T.t("not_in_chat"), reply_markup=K.main_menu())
         return
     await message.answer(T.t("report_ask"), reply_markup=K.report_kb(partner))
-
 
 @router.callback_query(F.data.startswith("rp:"))
 async def report_choice(cb: CallbackQuery, bot: Bot) -> None:
@@ -219,44 +207,38 @@ async def report_choice(cb: CallbackQuery, bot: Bot) -> None:
     if store.partner_of(uid) != partner:
         await safe_edit(cb.message, T.t("chat_ended"))
         return
-    await db.add_report(uid, partner, reason)
+    if not store.is_ai(partner):
+        await db.add_report(uid, partner, reason)
     await _end_current(bot, uid)
     await safe_edit(cb.message, T.t("report_sent"))
     await cb.message.answer(T.t("menu_open"), reply_markup=K.main_menu())
-
-
-# ---------------------------------------------------------------- relay (keep this LAST)
 
 @router.message(F.chat.type == "private")
 async def relay(message: Message, bot: Bot) -> None:
     uid = message.from_user.id
     partner = store.partner_of(uid)
-
     if message.text and message.text.startswith("/"):
-        return  # unknown command: never forward it to the stranger
-
+        return
     if partner is None:
         await message.answer(T.t("not_in_chat"), reply_markup=K.main_menu())
         return
-
     if message.contact or message.location or message.venue or message.poll:
         await message.answer(T.t("blocked_content"))
         return
-
-    if message.text is None:  # photo, voice, video, sticker, ... = VIP only
+    if message.text is None:
         user = await db.get_user(uid)
         if not user or not db.is_premium(user):
             await message.answer(T.t("media_premium"), reply_markup=K.premium_prompt_kb())
             return
-
     if not store.allow_message(uid, RATE_LIMIT_MSGS, RATE_LIMIT_WINDOW):
         await message.answer(T.t("slow_down"))
         return
-
+    if store.is_ai(partner):
+        await ai_partner.handle_user_message(bot, uid, message.text or "nice")
+        return
     try:
         await bot.copy_message(chat_id=partner, from_chat_id=uid, message_id=message.message_id)
     except TelegramForbiddenError:
-        # the stranger blocked the bot
         store.end_chat(uid)
         await message.answer(T.t("partner_left"), reply_markup=K.main_menu())
     except TelegramBadRequest as e:
