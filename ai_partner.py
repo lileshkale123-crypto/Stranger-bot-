@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.types import ReplyParameters
 
 import keyboards as K, texts as T
 from store import store
@@ -52,40 +53,67 @@ GENDER_QUESTIONS = ["m or f", "male or female", "m or f?", "male or female?", "b
 # ----------------------------------------------------------------------------------------
 # Personas. `bio` is facts the AI can use so it stays consistent. `style` is how they text.
 # ----------------------------------------------------------------------------------------
+CITIES = [
+    "delhi", "mumbai", "pune", "bangalore", "hyderabad", "chennai", "kolkata", "ahmedabad", "jaipur", "lucknow",
+    "indore", "bhopal", "nagpur", "surat", "chandigarh", "patna", "ranchi", "noida", "gurgaon", "ghaziabad",
+    "kanpur", "varanasi", "agra", "nashik", "vadodara", "coimbatore", "kochi", "thane", "dehradun", "raipur",
+    "bhubaneswar", "guwahati", "amritsar", "ludhiana", "jodhpur", "udaipur", "meerut", "prayagraj", "faridabad",
+    "aurangabad", "rajkot", "vizag", "mysore", "mangalore", "jabalpur", "gwalior", "kota", "ajmer", "bareilly", "jammu",
+]
+_NAMES = {
+    "female": ["riya", "ananya", "ishu", "simran", "neha", "pooja", "kavya", "tanvi", "aditi", "muskan", "sakshi",
+               "shivani", "khushi", "priya", "ritika", "diya", "nisha", "anjali", "komal", "sneha"],
+    "male": ["arjun", "rohan", "aman", "karan", "rahul", "harsh", "yash", "aditya", "vikas", "sahil", "kunal",
+             "raj", "abhi", "dev", "nikhil", "ankit", "mohit", "deepak"],
+}
+_ALL_NAMES = sorted({n for v in _NAMES.values() for n in v})
+
+# ----------------------------------------------------------------------------------------
+# Personas. `bio` is facts the AI can use so it stays consistent. `style` is how they text.
+# City, name and age are picked fresh for every chat (see _randomize), so the stranger can be from anywhere.
+# ----------------------------------------------------------------------------------------
 PERSONAS = [
     {
-        "name": "riya_playful", "ai_gender": "female", "city": "delhi", "fake_name": "riya", "age": 20,
-        "bio": "2nd year BA student at a Delhi University college. Loves netflix, k-dramas, maggi, reels and late night "
-               "chats. Has a younger brother. Hates early morning lectures. Likes momos and chai.",
-        "style": "playful and a bit teasing, friendly, curious. Lowercase Hinglish with usual shortcuts "
-                 "(nhi, kya kr rhi, wbu, u, ur, yaar, acha, haha). Emoji only now and then (😭 🌚 👀 😂).",
+        "name": "playful", "ai_gender": "female", "city": "delhi", "fake_name": "riya", "age": 20,
+        "bio": "College student. Loves netflix, k-dramas, maggi, reels and late night chats. Has a younger brother. "
+               "Hates early morning lectures. Likes momos and chai.",
+        "style": "playful and a bit teasing, friendly. Lowercase Hinglish with usual shortcuts "
+                 "(nhi, kya kr rhi, yaar, acha, haha). Emoji only now and then (😭 🌚 👀 😂).",
         "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
     {
-        "name": "ananya_chill", "ai_gender": "female", "city": "mumbai", "fake_name": "ananya", "age": 21,
-        "bio": "Final year BMS student in Mumbai, does a part time internship in social media. Night owl, "
-               "listens to arijit and taylor swift, loves chai, rains and long walks. Lives with parents in Andheri.",
+        "name": "chill", "ai_gender": "female", "city": "mumbai", "fake_name": "ananya", "age": 21,
+        "bio": "Final year college student, does a part time internship in social media. Night owl, "
+               "listens to arijit and taylor swift, loves chai, rains and long walks. Lives with parents.",
         "style": "calm, warm and a little slow to open up. Mixes casual English and Hinglish, lowercase. "
-                 "Words like: acha, haha, hmm, kyu, idk, rn, wbu. Few emojis.",
+                 "Words like: acha, haha, hmm, kyu, idk, rn. Few emojis.",
         "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
     {
-        "name": "ishita_attitude", "ai_gender": "female", "city": "pune", "fake_name": "ishu", "age": 19,
-        "bio": "First year engineering student in Pune, lives in a hostel. Moody, loves sleeping, hates "
+        "name": "attitude", "ai_gender": "female", "city": "pune", "fake_name": "ishu", "age": 19,
+        "bio": "First year engineering student, lives in a hostel. Moody, loves sleeping, hates "
                "mess food, likes anime and indie songs. Not easily impressed.",
         "style": "a bit sassy and dry, short replies, lowercase Hinglish (nhi, kyu, kya hua, acha, hmm, ok). "
-                 "Warms up and gets chatty if the stranger is nice and funny. Rare emoji.",
+                 "Gets a bit chattier if the stranger is nice and funny. Rare emoji.",
         "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
     {
-        "name": "arjun_casual", "ai_gender": "male", "city": "bangalore", "fake_name": "arjun", "age": 22,
-        "bio": "Works as a junior software developer in Bangalore, originally from Jaipur. Plays cricket on weekends, "
-               "plays valorant, loves filter coffee and biryani, goes on bike rides.",
-        "style": "easygoing, friendly, lowercase Hinglish with 'bro', 'yaar', 'ha', 'mast', 'sahi h', 'kya kr rha'. "
-                 "Asks the stranger things back. Rare emoji.",
+        "name": "casual", "ai_gender": "male", "city": "bangalore", "fake_name": "arjun", "age": 22,
+        "bio": "Works as a junior software developer, living away from his hometown. Plays cricket on weekends, "
+               "plays valorant, loves coffee and biryani, goes on bike rides.",
+        "style": "easygoing, friendly, lowercase Hinglish with 'bro', 'yaar', 'ha', 'mast', 'sahi h'. Rare emoji.",
         "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
 ]
+
+
+def _randomize(p: dict) -> dict:
+    """Every chat gets a fresh city, name and age, so strangers are not always from the same 4 cities."""
+    p = dict(p)
+    p["city"] = random.choice(CITIES)
+    p["fake_name"] = random.choice(_NAMES[p["ai_gender"]])
+    p["age"] = random.randint(18, 24)
+    return p
 
 
 def _ist_now() -> datetime:
@@ -107,6 +135,8 @@ HOW THE CHAT GOES:
 - Just reply to what they said, nothing extra. Mirror them: if they say hi, say hi back the same way ("hii", "hey", "hello") and STOP. Do not add "kaise ho" or anything else.
 - NEVER ask the stranger any question. No "kaise ho", "how are you", "kya kr rhe", "kaha se", "naam kya", "wbu", "u?", "tum?". Only answer what they ask, or react ("haha", "acha", "hmm", "sahi h", "ok").
 - If they ask you something, answer it plainly in a few words from your bio (city, name, college and so on) and do not ask it back.
+- Your city is {p['city'].capitalize()}. If asked where you are from, just say the city name. If they are from the same city, a simple "oh nice" is enough. Never invent facts about the city.
+- Sometimes the stranger replies to one of your earlier messages; their text then starts with (replying to: "..."). Use it to understand what they mean. Never write that prefix yourself.
 - No drama. No flirting first, no compliments, no emotional or dramatic lines, no emojis spam. Stay chill, plain and neutral like a normal stranger. If they flirt, just stay plain and short.
 - You do not know the stranger's name, city or gender until they tell you. Never invent their details. Never repeat their message back to them.
 - Language: Roman script Hinglish by default. If they write plain English, reply in simple English. If they write proper Hindi words, reply in Hinglish. NEVER use Devanagari, Urdu or Arabic script.
@@ -132,6 +162,8 @@ class AISession:
         self.turns, self.max_turns = 0, random.randint(18, 32)
         self.reply_task = self.opener_task = None
         self.recent_fallbacks: list[str] = []
+        self.pending_ids: list[int] = []
+        self.replied = False
         self.started_ts = time.monotonic()
         self.last_ai_ts: float | None = None
         self.reply_due: float | None = None
@@ -172,6 +204,7 @@ async def _disconnect_ai(bot: Bot, uid: int, delay: float = 2.0) -> None:
 async def start_session(bot: Bot, uid: int, gender: str, want: str | None) -> None:
     cleanup_session(uid)
     persona, ask_mode = _pick_session_config(want)
+    persona = _randomize(persona)
     s = AISession(uid, gender, want, persona, ask_mode)
     _sessions[uid] = s
     s.opener_task = asyncio.create_task(_maybe_open(bot, s))
@@ -204,7 +237,7 @@ async def _maybe_open(bot: Bot, s: AISession) -> None:
         log.exception("opener err")
 
 
-async def handle_user_message(bot: Bot, uid: int, text: str) -> None:
+async def handle_user_message(bot: Bot, uid: int, text: str, reply_quote: str | None = None, msg_id: int | None = None) -> None:
     s = _sessions.get(uid)
     if not s:
         return
@@ -230,6 +263,11 @@ async def handle_user_message(bot: Bot, uid: int, text: str) -> None:
         gap = now - (s.last_ai_ts or s.started_ts)
         extra = min(gap * random.uniform(0.1, 0.5), MAX_REPLY_DELAY) if gap > SLOW_GAP else 0.0
         s.reply_due = now + extra
+    if reply_quote:
+        msg = f'(replying to: "{reply_quote.strip()[:60]}") {msg}'
+        s.replied = True
+    if msg_id:
+        s.pending_ids.append(msg_id)
     s.pending.append(msg)
     if s.reply_task and not s.reply_task.done():
         s.reply_task.cancel()
@@ -246,6 +284,11 @@ async def _debounced(bot: Bot, s: AISession) -> None:
             return
         joined = "\n".join(s.pending)
         s.pending.clear()
+        quote_id = None
+        if s.pending_ids and (len(s.pending_ids) >= 2 or s.replied) and random.random() < 0.7:
+            quote_id = random.choice(s.pending_ids)      # real people quote when answering a burst / a reply
+        s.pending_ids.clear()
+        s.replied = False
         s.history.append({"role": "user", "content": joined})
         s.history = s.history[-HISTORY_KEEP:]
         s.turns += 1
@@ -264,7 +307,7 @@ async def _debounced(bot: Bot, s: AISession) -> None:
             return
         if _ASK_RE.search(reply):
             s.asked_gender = True
-        await _send_silent(bot, s, reply)
+        await _send_silent(bot, s, reply, quote_id)
         s.reply_due = None
     except asyncio.CancelledError:
         pass
@@ -272,7 +315,7 @@ async def _debounced(bot: Bot, s: AISession) -> None:
         log.exception("reply err")
 
 
-async def _send_silent(bot: Bot, s: AISession, raw: str) -> None:
+async def _send_silent(bot: Bot, s: AISession, raw: str, quote_id: int | None = None) -> None:
     bubbles = [b.strip() for b in re.split(r"\s*\|\s*|\n+", raw) if b.strip()][:2]
     for i, b in enumerate(bubbles):
         d = min(random.uniform(1.2, 2.4) + len(b) * 0.08, 5.0) if i == 0 else random.uniform(0.9, 1.8)
@@ -280,7 +323,10 @@ async def _send_silent(bot: Bot, s: AISession, raw: str) -> None:
         if _sessions.get(s.uid) is not s or not store.is_ai(store.partner_of(s.uid)):
             return
         try:
-            await bot.send_message(s.uid, b)
+            if quote_id and i == 0:
+                await bot.send_message(s.uid, b, reply_parameters=ReplyParameters(message_id=quote_id, allow_sending_without_reply=True))
+            else:
+                await bot.send_message(s.uid, b)
         except (TelegramForbiddenError, TelegramBadRequest):
             store.end_chat(s.uid)
             cleanup_session(s.uid)
@@ -306,7 +352,7 @@ _BAD_PHRASES = re.compile(
 )
 _LEADING_TAGS = re.compile(
     r"^\s*(?:[\[\(\{<][^\]\)\}>]{0,40}[\]\)\}>]\s*[:\-–]?\s*|(?:user|you|me|ai|assistant|bot|stranger|reply|response|output|message|text|"
-    r"riya|ananya|ishu|arjun)\s*:\s*)+",
+    r"" + "|".join(_ALL_NAMES) + r")\s*:\s*)+",
     re.I,
 )
 
@@ -345,7 +391,7 @@ def _drop_questions(bubbles: list[str]) -> list[str]:
 
 
 def _dedupe(t: str) -> str:
-    return re.sub(r"^(.{2,40}?)(?:\s*\1)+$", r"\1", t)
+    return re.sub(r"^(.{4,40}?)(?:\s*\1)+$", r"\1", t)
 
 
 def _words(lst: list[str]) -> int:

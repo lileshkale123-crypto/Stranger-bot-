@@ -1,8 +1,9 @@
 import asyncio, logging, random
+from collections import OrderedDict
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove, ReplyParameters
 
 import ai_partner, db, keyboards as K, premium, texts as T
 from config import AI_MATCH_DELAY_MAX, AI_MATCH_DELAY_MIN, FILTER_FALLBACK_SECONDS, RATE_LIMIT_MSGS, RATE_LIMIT_WINDOW
@@ -13,6 +14,14 @@ log = logging.getLogger(__name__)
 router = Router()
 _fallbacks: dict[int, asyncio.Task] = {}
 _ai_fallbacks: dict[int, asyncio.Task] = {}
+_reply_map: "OrderedDict[tuple[int, int], int]" = OrderedDict()   # (chat, msg) -> same message in partner's chat
+
+
+def _remember(a_chat: int, a_msg: int, b_chat: int, b_msg: int) -> None:
+    _reply_map[(a_chat, a_msg)] = b_msg
+    _reply_map[(b_chat, b_msg)] = a_msg
+    while len(_reply_map) > 40000:
+        _reply_map.popitem(last=False)
 
 def _registered(user) -> bool:
     return bool(user and user["gender"] and user["age_bracket"] and user["region"])
@@ -234,10 +243,16 @@ async def relay(message: Message, bot: Bot) -> None:
         await message.answer(T.t("slow_down"))
         return
     if store.is_ai(partner):
-        await ai_partner.handle_user_message(bot, uid, message.text or "nice")
+        rq = message.reply_to_message
+        quote = (rq.text or rq.caption) if rq else None
+        await ai_partner.handle_user_message(bot, uid, message.text or "nice", quote, message.message_id)
         return
     try:
-        await bot.copy_message(chat_id=partner, from_chat_id=uid, message_id=message.message_id)
+        rt = message.reply_to_message
+        target = _reply_map.get((uid, rt.message_id)) if rt else None
+        extra = {"reply_parameters": ReplyParameters(message_id=target, allow_sending_without_reply=True)} if target else {}
+        sent = await bot.copy_message(chat_id=partner, from_chat_id=uid, message_id=message.message_id, **extra)
+        _remember(uid, message.message_id, partner, sent.message_id)
     except TelegramForbiddenError:
         store.end_chat(uid)
         await message.answer(T.t("partner_left"), reply_markup=K.main_menu())
