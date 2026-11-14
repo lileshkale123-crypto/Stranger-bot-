@@ -139,8 +139,8 @@ HOW YOU TEXT: {p['style']}
 
 HOW THE CHAT GOES:
 - Just reply to what they said, nothing extra. Mirror them: if they say hi, say hi back the same way ("hii", "hey", "hello") and STOP. Do not add "kaise ho" or anything else.
-- NEVER ask the stranger any question. No "kaise ho", "how are you", "kya kr rhe", "kaha se", "naam kya", "wbu", "u?", "tum?". Only answer what they ask, or react ("haha", "acha", "hmm", "sahi h", "ok").
-- If they ask you something, answer it plainly in a few words from your bio (city, name, college and so on) and do not ask it back.
+- Answer what they ask first, plainly, in a few words from your bio. Then SOMETIMES (not every time) add one tiny question back like a normal person: "tum?", "aap?", "wbu", "tum btao", "tum kaha se?". Examples: they ask "kaha se ho" -> "{p['city']} se, tum?". They ask "kya kr rhe" -> "kuch nhi bss, tum?". If they say "wbu" or "tum?" just answer it, do not ask back.
+- At most ONE question in a message. Never repeat a question you already asked. Never ask about something they already told you. No interviewing: after you asked something, your next messages are plain replies or reactions. Never ask personal or flirty things.
 - Your city is {p['city'].capitalize()}. If asked where you are from, just say the city name. If they are from the same city, a simple "oh nice" is enough. Never invent facts about the city.
 - Sometimes the stranger replies to one of your earlier messages; their text then starts with (replying to: "..."). Use it to understand what they mean. Never write that prefix yourself.
 - No drama. No flirting first, no compliments, no emotional or dramatic lines, no emojis spam. Stay chill, plain and neutral like a normal stranger. If they flirt, just stay plain and short.
@@ -170,6 +170,9 @@ class AISession:
         # sometimes a real stranger just disappears after 10-20 messages
         self.max_turns = random.randint(10, 20) if random.random() < LEAVE_EARLY_CHANCE else random.randint(18, 32)
         self.facts: dict[str, str] = {}
+        self.last_q_turn = -10                     # turn number of her last question
+        self.asked_kinds: set[str] = set()         # what she already asked (city, name, doing, how)
+        self.pending_q: str | None = None          # what she just asked, so a bare "pune" reply can be saved
         self.reply_task = self.opener_task = None
         self.recent_fallbacks: list[str] = []
         self.pending_ids: list[int] = []
@@ -277,8 +280,16 @@ _ASKING_YOU = re.compile(r"\b(tum|tu|aap|you|u|ur|your|tera|teri|tumhara|tumhari
 
 def _learn_facts(s: AISession, msg: str) -> None:
     """Remember what the stranger tells us about themselves, so the AI never forgets or asks again."""
+    pq, s.pending_q = s.pending_q, None
+    if pq == "city" and "city" not in s.facts and "?" not in msg:
+        c = _CITY_RE.search(msg)
+        if c:
+            s.facts["city"] = c.group(1).capitalize()
+    if pq == "name" and "name" not in s.facts and re.fullmatch(r"[A-Za-z]{2,15}", msg.strip()) \
+            and msg.strip().lower() not in _NOT_NAMES:
+        s.facts["name"] = msg.strip().capitalize()
     m = _NAME_RE.search(msg) or _NAME2_RE.search(msg)
-    if m and m.group(1).lower() not in _NOT_NAMES and "name" not in s.facts:
+    if m and m.group(1).lower() not in _NOT_NAMES and m.group(1).lower() not in CITIES and "name" not in s.facts:
         s.facts["name"] = m.group(1).capitalize()
     if "?" not in msg and not _ASKING_YOU.search(msg):
         c = _CITY_RE.search(msg)
@@ -363,6 +374,10 @@ async def _debounced(bot: Bot, s: AISession) -> None:
             return
         if _ASK_RE.search(reply):
             s.asked_gender = True
+        if "?" in reply:
+            s.last_q_turn = s.turns
+            s.pending_q = _kind(reply)
+            s.asked_kinds.add(s.pending_q)
         await _send_silent(bot, s, reply, quote_id)
         s.reply_due = None
     except asyncio.CancelledError:
@@ -424,25 +439,79 @@ _Q_PHRASES = re.compile(
     r"tumhara naam|tera naam|aur bta|aur batao|tell me)\b", re.I)
 
 
-def _drop_questions(bubbles: list[str]) -> list[str]:
-    """The stranger never asks the user things. Cut question parts, keep the plain part ("hi kaise ho" -> "hi")."""
+_Q_END = re.compile(r"(?:^|\s)(tum|tu|aap|u)\s*\??$", re.I)
+_Q_WORDS = re.compile(r"\b(wbu|hbu|and u|and you|tum bta\w*|tu bta\w*|aap bataiye|aur bta\w*)\b", re.I)
+_USER_ASKED = re.compile(
+    r"\?|\b(kaha|kahan|kaise|kaisi|kaisa|kya|kon|kaun|naam|name|where|how|what|wbu|hbu|wyd|tum|aap|age|umar)\b", re.I)
+_KINDS = [
+    ("city", re.compile(r"kaha se|kahan se|where.*from|which city|kidhar", re.I)),
+    ("name", re.compile(r"naam|name", re.I)),
+    ("doing", re.compile(r"kya kr|kya kar|wyd|what.*doing", re.I)),
+    ("how", re.compile(r"kaise ho|kaisi ho|kaisa h|kese ho|how are|how r|kya haal", re.I)),
+]
+
+
+def _kind(text: str) -> str:
+    for k, r in _KINDS:
+        if r.search(text):
+            return k
+    return "back"
+
+
+def _is_q(c: str) -> bool:
+    return "?" in c or bool(_Q_PHRASES.search(c) or _Q_WORDS.search(c) or _Q_END.search(c))
+
+
+def _q_allowed(s: "AISession | None", user_msg: str) -> bool:
+    """A real person asks back now and then, not every message."""
+    if s is None:
+        return False
+    gap = s.turns - s.last_q_turn
+    if _USER_ASKED.search(user_msg or ""):
+        return gap >= 2 and random.random() < 0.6
+    return gap >= 4 and random.random() < 0.25
+
+
+def _drop_questions(bubbles: list[str], s: "AISession | None" = None, user_msg: str = "") -> list[str]:
+    """Keeps at most one tiny question ("tum?", "kaha se?") when allowed, removes every other one."""
+    allow = _q_allowed(s, user_msg)
+    kept = False
     out = []
     for b in bubbles:
-        cut = False
-        n = _Q_TAIL.sub("", b).strip(" ,")
-        cut = n != b.strip(" ,")
-        b = n
-        m = _Q_PHRASES.search(b)
-        if m:
-            b, cut = b[:m.start()], True
-        if "?" in b:
-            cut = True
-        parts = [c.strip() for c in re.split(r"[,.!]+\s*", b) if c.strip() and "?" not in c]
-        b = ", ".join(parts)
-        if cut:
-            b = re.sub(r"\b(aap|tum|tu|u|you|bhi|aur)$", "", b).strip(" ,")
-        if b:
-            out.append(b)
+        parts = []
+        for c in [x.strip(" ,.!") for x in re.split(r",\s*|(?<=[.!?])\s+", b)]:
+            if not c:
+                continue
+            if not _is_q(c):
+                parts.append(c)
+                continue
+            head = ""
+            m = _Q_END.search(c)
+            if m and "?" not in c[:m.start()] and len(c.split()) > 1:
+                head, c = c[:m.start()].strip(" ,?"), m.group(1) + "?"      # "thik hu tum" -> "thik hu" + "tum?"
+            if head and not _is_q(head):
+                parts.append(head)
+            kind = _kind(c)
+            blocked = (
+                kept or not allow or len(c.split()) > 5 or s is None
+                or (kind == "city" and "city" in s.facts)
+                or (kind == "name" and "name" in s.facts)
+                or (kind != "back" and kind in s.asked_kinds)
+                or (_ASK_RE.search(c) and not s.ask_gender_mode)
+            )
+            if blocked:
+                if "?" not in c:                                       # plain words like "kaise ho": cut the question part
+                    mm = _Q_PHRASES.search(c)
+                    rest = (c[:mm.start()] if mm else c).strip(" ,")
+                    rest = _Q_END.sub("", rest).strip(" ,")
+                    if rest and not _is_q(rest):
+                        parts.append(rest)
+                continue
+            parts.append(c.rstrip("?") + "?")
+            kept = True
+        b2 = ", ".join(parts)
+        if b2:
+            out.append(b2)
     return out
 
 
@@ -479,7 +548,7 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
     if not out:
         return ""
     out = [x for ln in out for x in re.split(r"\s*\|\s*", ln) if x.strip()]
-    out = _drop_questions(out)[:2]
+    out = _drop_questions(out, s, user_msg)[:2]
     if not out:
         return ""
     if _words(out) > MAX_WORDS:                  # too long for a real texter: keep first sentence only
@@ -513,6 +582,11 @@ def _smart_fallback(s: AISession, user_msg: str) -> str:
     p = s.persona
     f = p["ai_gender"] == "female"
 
+    def ab() -> str:
+        if s.turns - s.last_q_turn >= 2 and random.random() < 0.55:
+            return random.choice([", tum?", ", aap?", ", wbu?"])
+        return ""
+
     def pick(opts: list[str]) -> str:
         fresh = [o for o in opts if o not in s.recent_fallbacks] or opts
         c = random.choice(fresh)
@@ -522,9 +596,9 @@ def _smart_fallback(s: AISession, user_msg: str) -> str:
     if "(sent a" in m:
         return pick(["haha", "cute", "kya hai ye", "nice", "lol", "ohh acha", "haha sahi"])
     if re.search(r"kaha se|kahan se|where.*(from|you)|which city|kidhar|from\?", m):
-        return pick([f"{p['city']} se", f"{p['city']}", f"{p['city']} se hu"])
+        return pick([f"{p['city']} se", f"{p['city']}", f"{p['city']} se hu"]) + ab()
     if re.search(r"naam|name|kon ho|kaun ho", m):
-        return pick([f"{p['fake_name']}", f"{p['fake_name']} naam h", f"{p['fake_name']} h"])
+        return pick([f"{p['fake_name']}", f"{p['fake_name']} naam h", f"{p['fake_name']} h"]) + ab()
     if _ASK_RE.search(m) or m.strip() in ("m?", "f?") or re.search(r"\b(female|male|girl|boy|ladki|ladka)\b.*\b(ya|or)\b", m):
         return pick(["f", "female"] if f else ["m", "male"])
     if re.search(r"insta|\big\b|snap|number|whatsapp|\bwa\b|tg id|telegram id", m):
@@ -532,9 +606,11 @@ def _smart_fallback(s: AISession, user_msg: str) -> str:
     if re.search(r"bot|\bai\b|real|fake", m):
         return pick(["lol nhi yaar", "haha bot kaisa", "insaan hu yaar"])
     if re.search(r"kya kr|kya kar|wyd|what.*doing|wassup|what'?s up|\bsup\b", m):
-        return pick(["kuch nhi bss timepass", "bss lete hue", "kuch khaas nhi"])
+        return pick(["kuch nhi bss timepass", "bss lete hue", "kuch khaas nhi"]) + ab()
     if re.search(r"how are|kaise ho|kaisi ho|kaisa h|kese ho|kya haal", m):
-        return pick(["thik hu", "mast hu", "badhiya"])
+        return pick(["thik hu", "mast hu", "badhiya"]) + ab()
+    if re.search(r"\bwbu\b|\bhbu\b|and u\b|and you\b|\b(tum|aap|tu)\s*\?", m):
+        return pick(["thik hu", "mast hu", "bss chill", "badhiya", "kuch khaas nhi"])
     if re.search(r"\b(hi+|hey+|hlw|hello|hyy|oi|yo|hii+)\b", m):
         return pick(["hii", "hey", "hello", "heyy", "hlw"])
     return pick(["haha acha", "hmm acha", "achaa", "sahi h", "haha sahi", "hmm", "ohh acha"])
