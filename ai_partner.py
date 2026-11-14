@@ -139,7 +139,8 @@ HOW YOU TEXT: {p['style']}
 
 HOW THE CHAT GOES:
 - Just reply to what they said, nothing extra. Mirror them: if they say hi, say hi back the same way ("hii", "hey", "hello") and STOP. Do not add "kaise ho" or anything else.
-- Answer what they ask first, plainly, in a few words from your bio. Then SOMETIMES (not every time) add one tiny question back like a normal person: "tum?", "aap?", "wbu", "tum btao", "tum kaha se?". Examples: they ask "kaha se ho" -> "{p['city']} se, tum?". They ask "kya kr rhe" -> "kuch nhi bss, tum?". If they say "wbu" or "tum?" just answer it, do not ask back.
+- Answer what they ask first, plainly, in a few words from your bio. Then SOMETIMES (not every time) add one tiny question back like a normal person: "tum?", "aap?", "wbu", "tum btao", "tum kaha se?". If they ask where you are from, say your city, and only sometimes add a tiny "tum?". If they say "wbu" or "tum?" just answer it, do not ask back.
+- Answer ONLY what is really in their latest message. If you do not understand it, reply with one tiny confused word ("kya", "matlab", "hm"). Never answer a question they did not ask. Never copy example lines.
 - At most ONE question in a message. Never repeat a question you already asked. Never ask about something they already told you. No interviewing: after you asked something, your next messages are plain replies or reactions. Never ask personal or flirty things.
 - Your city is {p['city'].capitalize()}. If asked where you are from, just say the city name. If they are from the same city, a simple "oh nice" is enough. Never invent facts about the city.
 - Sometimes the stranger replies to one of your earlier messages; their text then starts with (replying to: "..."). Use it to understand what they mean. Never write that prefix yourself.
@@ -573,7 +574,20 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
     rn = _norm(reply)
     if len(um) > 3 and _words([reply]) >= 3 and (rn in um or difflib.SequenceMatcher(None, um, rn).ratio() > 0.85):
         return ""                                                                      # parroting the user
+    low, um_l = reply.lower(), (user_msg or "").lower()
+    if re.match(r"\s*(kuch nhi|kuch khaas|bss|bas)\b", low) and not (_WYD_RE.search(um_l) or _BACK_RE.search(um_l)):
+        return ""                                                   # answers "what are you doing" nobody asked
+    if re.match(r"\s*(thik|theek|mast|badhiya)\s*(hu|hun|h)\b", low) and not (_HOW_RE.search(um_l) or _BACK_RE.search(um_l)):
+        return ""                                                   # answers "how are you" nobody asked
+    if s is not None and re.match(rf"\s*{re.escape(s.persona['city'])}\b", low) and not _WHERE_RE.search(um_l):
+        return ""                                                   # says her city without being asked
     return reply
+
+
+_BACK_RE = re.compile(r"\bwbu\b|\bhbu\b|\band u\b|\band you\b|\b(tum|aap|tu|u)\s*\?")
+_WYD_RE = re.compile(r"kya kr|kya kar|kr rh|kar rh|wyd|what.*(doing|up)|wassup|\bsup\b|kya chal|free|busy|timepass|din kaisa|kaisa din")
+_HOW_RE = re.compile(r"kaise|kaisi|kaisa|kese|\bhow\b|kya haal|hal chal|mood|tabiyat")
+_WHERE_RE = re.compile(r"kaha|kahan|kidhar|where|\bfrom\b|city|location|\bplace\b|rehte|rehti|se ho|se h\b")
 
 
 def _smart_fallback(s: AISession, user_msg: str) -> str:
@@ -613,6 +627,8 @@ def _smart_fallback(s: AISession, user_msg: str) -> str:
         return pick(["thik hu", "mast hu", "bss chill", "badhiya", "kuch khaas nhi"])
     if re.search(r"\b(hi+|hey+|hlw|hello|hyy|oi|yo|hii+)\b", m):
         return pick(["hii", "hey", "hello", "heyy", "hlw"])
+    if "?" in m and len(m.split()) <= 4:
+        return pick(["kya", "matlab", "kya bola", "hm"])
     return pick(["haha acha", "hmm acha", "achaa", "sahi h", "haha sahi", "hmm", "ohh acha"])
 
 
