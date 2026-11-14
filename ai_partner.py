@@ -294,6 +294,7 @@ async def _send_silent(bot: Bot, s: AISession, raw: str) -> None:
 # Reply cleaning. Anything that makes the stranger sound fake is removed or rejected here.
 # ----------------------------------------------------------------------------------------
 LEAVE = "[leave]"
+_RUDE_RE = re.compile(r"\b(sex|nude|nudes|fuck|chut|lund|bhosd|randi|gaand|boobs|dick|pussy|mc|bc|madarchod|behenchod|bsdk|saali|chod)", re.I)
 
 _FOREIGN_SCRIPT = re.compile(r"[؀-ۿݐ-ݿऀ-ॿЀ-ӿ֐-׿一-鿿぀-ヿ가-힯]")
 _BAD_PHRASES = re.compile(
@@ -352,7 +353,10 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
     if not t:
         return ""
     if "[leave]" in t.lower():
-        return LEAVE
+        if _RUDE_RE.search(user_msg or ""):
+            return LEAVE
+        log.info("Ignored [leave] from model, user was not rude: %r", t[:80])
+        return ""
     t = re.sub(r"<think>.*?</think>", "", t, flags=re.S | re.I)
     t = re.sub(r"<think>.*$", "", t, flags=re.S | re.I)
     t = re.sub(r"```.*?```", "", t, flags=re.S)
