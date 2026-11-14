@@ -28,6 +28,7 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 # Change these from Railway > Variables (comma separated) when a model gets retired.
 GROQ_MODELS = _env_list("GROQ_MODELS", ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
 GEMINI_MODELS = _env_list("GEMINI_MODELS", ["gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash-lite"])
+MAX_WORDS = int(os.getenv("MAX_WORDS", "9"))   # hard cap on words per reply
 LLM_DEADLINE = 20.0   # seconds, whole reply chain
 HISTORY_KEEP = 16
 
@@ -105,7 +106,7 @@ HOW THE CHAT GOES:
 - First answer what they just said or asked. Then, only sometimes, ask one simple thing back (name, city, what they're up to, college or work, music, movies). Do not ask a question in every message.
 - You do not know the stranger's name, city or gender until they tell you. Never invent their details. Never repeat their message back to them.
 - Language: Roman script Hinglish by default. If they write plain English, reply in simple English. If they write proper Hindi words, reply in Hinglish. NEVER use Devanagari, Urdu or Arabic script.
-- Length: like real texting. Usually 2 to 10 words, sometimes just "hmm" or "haha acha". At most 2 short messages, each on its own line. Lowercase, no full stops at the end.
+- LENGTH IS A HARD RULE: 3 to 7 words in total. NEVER more than 9 words. One short line only (a tiny second line like "u?" is okay). No long sentences, no explaining. Sometimes just "hmm" or "haha acha". Lowercase, no full stops at the end.
 - Do not introduce yourself in the third person, do not say your own name unless they ask it, do not say "{p['city']} ki {p['fake_name']}".
 - Never sound like customer support. Forbidden: "how can i help", "assist", "feel free to", "tell me more about yourself", long polite sentences.
 - Do not give Instagram, snap, phone number or any link. Deflect in a natural way (we only just met, let's talk here).
@@ -257,10 +258,6 @@ async def _send_silent(bot: Bot, s: AISession, raw: str) -> None:
     bubbles = [b.strip() for b in re.split(r"\s*\|\s*|\n+", raw) if b.strip()][:2]
     for i, b in enumerate(bubbles):
         d = min(random.uniform(1.2, 2.4) + len(b) * 0.08, 5.0) if i == 0 else random.uniform(0.9, 1.8)
-        try:
-            await bot.send_chat_action(s.uid, "typing")   # shows "typing..." like a real person
-        except Exception:
-            pass
         await asyncio.sleep(d)
         if _sessions.get(s.uid) is not s or not store.is_ai(store.partner_of(s.uid)):
             return
@@ -298,6 +295,10 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", "", s.lower()).strip()
 
 
+def _words(lst: list[str]) -> int:
+    return sum(1 for x in lst for w in x.split() if re.search(r"\w", w))
+
+
 def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
     """Return a safe reply, LEAVE, or "" if the text is not usable."""
     if not t:
@@ -320,11 +321,16 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
     if not out:
         return ""
     out = out[:2]
+    if _words(out) > MAX_WORDS:                  # too long for a real texter: keep first sentence only
+        first = re.split(r"(?<=[.!?])\s+", out[0])[0].rstrip(".,")
+        out = [first]
+        if _words(out) > MAX_WORDS:
+            return ""
     reply = " | ".join(out)
 
     if _FOREIGN_SCRIPT.search(reply) or _BAD_PHRASES.search(reply):
         return ""
-    if len(reply) > 200 or any(len(b) > 130 for b in out):
+    if len(reply) > 120:
         return ""
     if s is not None:
         p = s.persona
