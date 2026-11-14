@@ -344,6 +344,10 @@ def _drop_questions(bubbles: list[str]) -> list[str]:
     return out
 
 
+def _dedupe(t: str) -> str:
+    return re.sub(r"^(.{2,40}?)(?:\s*\1)+$", r"\1", t)
+
+
 def _words(lst: list[str]) -> int:
     return sum(1 for x in lst for w in x.split() if re.search(r"\w", w))
 
@@ -369,7 +373,7 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
         if ln.endswith(".") and not ln.endswith(".."):
             ln = ln[:-1].strip()
         if ln:
-            out.append(ln.lower())
+            out.append(_dedupe(ln.lower()))
     if not out:
         return ""
     out = [x for ln in out for x in re.split(r"\s*\|\s*", ln) if x.strip()]
@@ -396,7 +400,7 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
             return ""                                                                  # same long line twice in a row
     um = _norm(user_msg)
     rn = _norm(reply)
-    if len(um) > 3 and len(rn) >= 6 and (rn in um or difflib.SequenceMatcher(None, um, rn).ratio() > 0.85):
+    if len(um) > 3 and _words([reply]) >= 3 and (rn in um or difflib.SequenceMatcher(None, um, rn).ratio() > 0.85):
         return ""                                                                      # parroting the user
     return reply
 
@@ -417,7 +421,7 @@ def _smart_fallback(s: AISession, user_msg: str) -> str:
         return pick([f"{p['city']} se", f"{p['city']}", f"{p['city']} se hu"])
     if re.search(r"naam|name|kon ho|kaun ho", m):
         return pick([f"{p['fake_name']}", f"{p['fake_name']} naam h", f"{p['fake_name']} h"])
-    if _ASK_RE.search(m) or m.strip() in ("m?", "f?"):
+    if _ASK_RE.search(m) or m.strip() in ("m?", "f?") or re.search(r"\b(female|male|girl|boy|ladki|ladka)\b.*\b(ya|or)\b", m):
         return pick(["f", "female"] if f else ["m", "male"])
     if re.search(r"insta|\big\b|snap|number|whatsapp|\bwa\b|tg id|telegram id", m):
         return pick(["abhi toh mile h yaar", "itni jaldi nhi yaar", "yahi baat krte h na"])
@@ -523,7 +527,7 @@ async def _llm(s: AISession, last_user_msg: str) -> str:
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + LLM_DEADLINE
-    temp = 0.85
+    temp = 0.75
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=9)) as http:
         for model in GROQ_MODELS:
@@ -538,7 +542,7 @@ async def _llm(s: AISession, last_user_msg: str) -> str:
                 if status == 200:
                     c = _clean(raw, s, last_user_msg)
                     if c:
-                        log.info("AI reply from groq/%s", model)
+                        log.info("AI reply from groq/%s: raw=%r final=%r", model, raw[:100], c)
                         return c
                     log.info("Groq %s reply rejected by cleaner: %r", model, raw[:120])
                     break
@@ -557,7 +561,7 @@ async def _llm(s: AISession, last_user_msg: str) -> str:
                 if status == 200:
                     c = _clean(raw, s, last_user_msg)
                     if c:
-                        log.info("AI reply from gemini/%s", model)
+                        log.info("AI reply from gemini/%s: raw=%r final=%r", model, raw[:100], c)
                         return c
                     log.info("Gemini %s reply rejected by cleaner: %r", model, raw[:120])
                     break
