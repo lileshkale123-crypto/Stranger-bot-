@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS reports (
     status      TEXT NOT NULL DEFAULT 'open',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS ai_chats (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL,
+    seconds    INT NOT NULL,
+    msgs       INT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ai_chats_created_idx ON ai_chats (created_at);
 """
 
 # Only these columns may be changed through set_field (prevents SQL injection)
@@ -314,3 +323,32 @@ async def apply_payment(
             until = await _extend_vip(con, user_id, days)
     invalidate(user_id)
     return until
+
+
+# ---------------------------------------------------------------- AI chat stats
+
+async def log_ai_chat(user_id: int, seconds: int, msgs: int) -> None:
+    async with pool.acquire() as con:
+        await con.execute(
+            "INSERT INTO ai_chats (user_id, seconds, msgs) VALUES ($1, $2, $3)",
+            user_id, seconds, msgs,
+        )
+
+
+async def ai_chat_stats() -> dict:
+    """Only chats where the user actually sent something (msgs > 0) count as 'chats'."""
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """
+            SELECT count(*) FILTER (WHERE msgs > 0) AS chats,
+                   count(*) FILTER (WHERE msgs > 0 AND created_at > now() - interval '24 hours') AS chats_24h,
+                   count(DISTINCT user_id) FILTER (WHERE msgs > 0) AS users,
+                   count(DISTINCT user_id) FILTER (WHERE msgs > 0 AND created_at > now() - interval '24 hours') AS users_24h,
+                   COALESCE(avg(seconds) FILTER (WHERE msgs > 0), 0) AS avg_sec,
+                   COALESCE(avg(msgs) FILTER (WHERE msgs > 0), 0) AS avg_msgs
+            FROM ai_chats
+            """
+        )
+    d = dict(row)
+    d["avg_sec"], d["avg_msgs"] = float(d["avg_sec"]), float(d["avg_msgs"])
+    return d

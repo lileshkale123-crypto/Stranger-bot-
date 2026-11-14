@@ -15,7 +15,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ReplyParameters
 
-import keyboards as K, texts as T
+import db, keyboards as K, texts as T
 from store import store
 
 log = logging.getLogger(__name__)
@@ -34,6 +34,8 @@ SLOW_GAP = 60.0                                  # user slower than this (second
 MAX_REPLY_DELAY = float(os.getenv("MAX_REPLY_DELAY", "1800"))   # never wait longer than 30 min
 LLM_DEADLINE = 20.0   # seconds, whole reply chain
 HISTORY_KEEP = 16
+QUIET_CHANCE = float(os.getenv("QUIET_CHANCE", "0.08"))              # chance she reads your msg and answers minutes later
+LEAVE_EARLY_CHANCE = float(os.getenv("LEAVE_EARLY_CHANCE", "0.15"))  # chance she leaves after only 10-20 messages
 
 
 def _get_keys(env_names: tuple[str, ...]) -> list[str]:
@@ -120,10 +122,14 @@ def _ist_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=5, minutes=30)))
 
 
-def _build_prompt(p: dict) -> str:
+def _build_prompt(p: dict, facts: dict | None = None) -> str:
     now = _ist_now()
     t = now.strftime("%I:%M %p") + (" (late night)" if now.hour >= 23 or now.hour < 5 else "")
     gender_word = "girl" if p["ai_gender"] == "female" else "guy"
+    known = ""
+    if facts:
+        bits = ", ".join(f"their {k} is {v}" for k, v in facts.items())
+        known = f"\n- The stranger already told you: {bits}. Remember it, never ask for it again, mention it only when it fits."
     return f"""You are {p['fake_name'].capitalize()}, a {p['age']} year old Indian {gender_word} from {p['city'].capitalize()}. You are texting a random stranger on an anonymous chat app on Telegram. It is {t} in India right now.
 
 YOU ARE A REAL HUMAN. Never say or hint that you are an AI, bot, assistant or program. If asked "bot ho?" or "are you ai?", laugh it off in your own way ("lol nhi yaar", "bot kaisa") and carry on.
@@ -138,7 +144,8 @@ HOW THE CHAT GOES:
 - Your city is {p['city'].capitalize()}. If asked where you are from, just say the city name. If they are from the same city, a simple "oh nice" is enough. Never invent facts about the city.
 - Sometimes the stranger replies to one of your earlier messages; their text then starts with (replying to: "..."). Use it to understand what they mean. Never write that prefix yourself.
 - No drama. No flirting first, no compliments, no emotional or dramatic lines, no emojis spam. Stay chill, plain and neutral like a normal stranger. If they flirt, just stay plain and short.
-- You do not know the stranger's name, city or gender until they tell you. Never invent their details. Never repeat their message back to them.
+- You do not know the stranger's name, city or gender until they tell you. Never invent their details. Never repeat their message back to them.{known}
+- Sometimes their message is only a note like (sent a photo) or (sent a sticker 😂). React like a normal person in 1 to 3 words ("haha", "cute", "kya hai ye", "nice", "lol"). Never repeat or describe the note.
 - Language: Roman script Hinglish by default. If they write plain English, reply in simple English. If they write proper Hindi words, reply in Hinglish. NEVER use Devanagari, Urdu or Arabic script.
 - LENGTH IS A HARD RULE: 3 to 7 words in total. NEVER more than 9 words. One short line only. No long sentences, no explaining. Sometimes just "hmm" or "haha acha". Lowercase, no full stops at the end.
 - Do not introduce yourself in the third person, do not say your own name unless they ask it, do not say "{p['city']} ki {p['fake_name']}".
@@ -159,7 +166,10 @@ class AISession:
         self.ask_gender_mode = ask_gender_mode
         self.history, self.pending = [], []
         self.asked_gender = False
-        self.turns, self.max_turns = 0, random.randint(18, 32)
+        self.turns = 0
+        # sometimes a real stranger just disappears after 10-20 messages
+        self.max_turns = random.randint(10, 20) if random.random() < LEAVE_EARLY_CHANCE else random.randint(18, 32)
+        self.facts: dict[str, str] = {}
         self.reply_task = self.opener_task = None
         self.recent_fallbacks: list[str] = []
         self.pending_ids: list[int] = []
@@ -181,12 +191,29 @@ def _pick_session_config(want: str | None) -> tuple[dict, bool]:
     return dict(random.choice(pool)), ask_gender_mode
 
 
+_bg: set[asyncio.Task] = set()
+
+
+async def _log_chat(uid: int, seconds: int, msgs: int) -> None:
+    try:
+        await db.log_ai_chat(uid, seconds, msgs)
+    except Exception:
+        log.exception("ai chat log failed")
+
+
 def cleanup_session(uid: int) -> None:
     s = _sessions.pop(uid, None)
     if s:
         for t in (s.reply_task, s.opener_task):
             if t and not t.done():
                 t.cancel()
+        try:
+            task = asyncio.get_running_loop().create_task(
+                _log_chat(uid, int(time.monotonic() - s.started_ts), s.turns))
+            _bg.add(task)
+            task.add_done_callback(_bg.discard)
+        except RuntimeError:
+            pass
 
 
 async def _disconnect_ai(bot: Bot, uid: int, delay: float = 2.0) -> None:
@@ -237,6 +264,28 @@ async def _maybe_open(bot: Bot, s: AISession) -> None:
         log.exception("opener err")
 
 
+_NAME_RE = re.compile(
+    r"\b(?:my name is|my name'?s|mera naam|meri naam|call me|i am called|i'?m called)\s+(?:(?:is|hai|h|he)\s+)?([a-z]{2,15})\b", re.I)
+_NAME2_RE = re.compile(r"\b(?:I am|I'm|Im|main|mai|Main|Mai)\s+([A-Z][a-z]{2,14})\b")
+_NOT_NAMES = {"hai", "he", "is", "kya", "ye", "yeh", "fine", "good", "bored", "single", "okay", "ok", "here", "sorry",
+              "tired", "sleepy", "hungry", "busy", "free", "student", "back", "real", "serious", "great", "well",
+              "nice", "happy", "sad", "alone", "online", "also", "just", "not", "from", "the", "your", "you"}
+_CITY_RE = re.compile(r"\b(" + "|".join(CITIES) + r")\b", re.I)
+_CITY_CTX = re.compile(r"\b(from|in|se|me|mein|mai|main|rehta|rehti|rehte|live|living|lives|city|belong|hu|hun|h|here)\b", re.I)
+_ASKING_YOU = re.compile(r"\b(tum|tu|aap|you|u|ur|your|tera|teri|tumhara|tumhari)\b", re.I)
+
+
+def _learn_facts(s: AISession, msg: str) -> None:
+    """Remember what the stranger tells us about themselves, so the AI never forgets or asks again."""
+    m = _NAME_RE.search(msg) or _NAME2_RE.search(msg)
+    if m and m.group(1).lower() not in _NOT_NAMES and "name" not in s.facts:
+        s.facts["name"] = m.group(1).capitalize()
+    if "?" not in msg and not _ASKING_YOU.search(msg):
+        c = _CITY_RE.search(msg)
+        if c and _CITY_CTX.search(msg):
+            s.facts["city"] = c.group(1).capitalize()
+
+
 async def handle_user_message(bot: Bot, uid: int, text: str, reply_quote: str | None = None, msg_id: int | None = None) -> None:
     s = _sessions.get(uid)
     if not s:
@@ -248,6 +297,11 @@ async def handle_user_message(bot: Bot, uid: int, text: str, reply_quote: str | 
         return
 
     is_m, is_f = bool(_M_RE.match(msg)), bool(_F_RE.match(msg))
+    if is_m:
+        s.facts["gender"] = "guy"
+    elif is_f:
+        s.facts["gender"] = "girl"
+    _learn_facts(s, msg)
     if (s.asked_gender or s.turns <= 2) and (is_m or is_f):
         if is_m and (s.ask_gender_mode or s.asked_gender):
             asyncio.create_task(_disconnect_ai(bot, uid, random.uniform(1.5, 3.0)))
@@ -262,6 +316,8 @@ async def handle_user_message(bot: Bot, uid: int, text: str, reply_quote: str | 
         # (10% to 50% of their delay, max 30 min). Fast users get a normal quick reply.
         gap = now - (s.last_ai_ts or s.started_ts)
         extra = min(gap * random.uniform(0.1, 0.5), MAX_REPLY_DELAY) if gap > SLOW_GAP else 0.0
+        if s.turns >= 3 and random.random() < QUIET_CHANCE:
+            extra = max(extra, random.uniform(90.0, 240.0))      # went "seen", answers a few minutes later
         s.reply_due = now + extra
     if reply_quote:
         msg = f'(replying to: "{reply_quote.strip()[:60]}") {msg}'
@@ -463,6 +519,8 @@ def _smart_fallback(s: AISession, user_msg: str) -> str:
         s.recent_fallbacks = (s.recent_fallbacks + [c])[-6:]
         return c
 
+    if "(sent a" in m:
+        return pick(["haha", "cute", "kya hai ye", "nice", "lol", "ohh acha", "haha sahi"])
     if re.search(r"kaha se|kahan se|where.*(from|you)|which city|kidhar|from\?", m):
         return pick([f"{p['city']} se", f"{p['city']}", f"{p['city']} se hu"])
     if re.search(r"naam|name|kon ho|kaun ho", m):
@@ -561,7 +619,7 @@ async def _gemini(http: aiohttp.ClientSession, key: str, model: str, sys_p: str,
 
 
 async def _llm(s: AISession, last_user_msg: str) -> str:
-    sys_p = _build_prompt(s.persona)
+    sys_p = _build_prompt(s.persona, s.facts)
     turns = _merge_turns(s.history)
     groq_msgs = [{"role": "system", "content": sys_p}] + turns
     g_keys = _get_keys(("GROQ_API_KEYS", "GROQ_API_KEY"))

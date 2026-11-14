@@ -55,12 +55,16 @@ def _cancel_kb() -> InlineKeyboardMarkup:
 async def _dashboard() -> tuple[str, InlineKeyboardMarkup]:
     d = await db.stats()
     open_reports = await db.open_report_count()
+    ai = await db.ai_chat_stats()
     text = T.stylize(
         "🛠 <b>Admin panel</b>\n"
         f"{DIV}\n"
         f"👥 Users: <b>{d['users']}</b>   🆕 24h: <b>{d['new_24h']}</b>\n"
         f"💎 VIP now: <b>{d['vip']}</b>   🎁 Referred: <b>{d['referred']}</b>\n"
         f"🟢 Online: <b>{store.online()}</b>   💬 Chats: <b>{store.active_chats()}</b>\n"
+        f"🤖 AI chats 24h: <b>{ai['chats_24h']}</b> by <b>{ai['users_24h']}</b> users\n"
+        f"🤖 AI chats total: <b>{ai['chats']}</b> by <b>{ai['users']}</b> users\n"
+        f"⏱ Avg AI chat: <b>{ai['avg_sec'] / 60:.1f}</b> min, <b>{ai['avg_msgs']:.0f}</b> msgs\n"
         f"🚩 Open reports: <b>{open_reports}</b>"
     )
     kb = _kb(

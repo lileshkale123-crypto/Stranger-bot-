@@ -23,6 +23,31 @@ def _remember(a_chat: int, a_msg: int, b_chat: int, b_msg: int) -> None:
     while len(_reply_map) > 40000:
         _reply_map.popitem(last=False)
 
+def _describe(m: Message) -> str:
+    """Text for the AI when the user sends a photo/sticker/etc, so she can react like a person."""
+    if m.text:
+        return m.text
+    if m.sticker:
+        return f"(sent a sticker {m.sticker.emoji})" if m.sticker.emoji else "(sent a sticker)"
+    if m.photo:
+        kind = "a photo"
+    elif m.animation:
+        kind = "a gif"
+    elif m.video:
+        kind = "a video"
+    elif m.video_note:
+        kind = "a video message"
+    elif m.voice:
+        kind = "a voice message"
+    elif m.audio:
+        kind = "a song"
+    elif m.document:
+        kind = "a file"
+    else:
+        kind = "something"
+    cap = f', caption: "{m.caption.strip()[:60]}"' if m.caption else ""
+    return f"(sent {kind}{cap})"
+
 def _registered(user) -> bool:
     return bool(user and user["gender"] and user["age_bracket"] and user["region"])
 
@@ -245,7 +270,7 @@ async def relay(message: Message, bot: Bot) -> None:
     if store.is_ai(partner):
         rq = message.reply_to_message
         quote = (rq.text or rq.caption) if rq else None
-        await ai_partner.handle_user_message(bot, uid, message.text or "nice", quote, message.message_id)
+        await ai_partner.handle_user_message(bot, uid, _describe(message), quote, message.message_id)
         return
     try:
         rt = message.reply_to_message
