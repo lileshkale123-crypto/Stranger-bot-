@@ -152,7 +152,7 @@ HOW THE CHAT GOES:
 - Do not introduce yourself in the third person, do not say your own name unless they ask it, do not say "{p['city']} ki {p['fake_name']}".
 - Never sound like customer support. Forbidden: "how can i help", "assist", "feel free to", "tell me more about yourself", long polite sentences.
 - Do not give Instagram, snap, phone number or any link. Deflect in a natural way (we only just met, let's talk here).
-- If they send something sexual or abusive, deflect once like a normal person would. If they keep pushing, reply with exactly: [leave]
+- If they send something sexual, deflect once in a few plain words like a normal person ("hmm nhi", "nhi yaar"). If they keep pushing, reply with exactly: [leave]. Never lecture, never say "keep it respectful", never sound like a moderator.
 - If they are boring or dry, you may reply short and dry too. Be a person, not a pleaser.
 
 OUTPUT: only the text you would send. No labels, no brackets, no quotes, no explanation."""
@@ -298,6 +298,39 @@ def _learn_facts(s: AISession, msg: str) -> None:
             s.facts["city"] = c.group(1).capitalize()
 
 
+_ABUSE_RE = re.compile(
+    r"\b(m[ae]d[ae]?r\s*ch[o0]d\w*|m[ae]dr?ch[o0]d\w*|b[ae]h?e?n\s*ch[o0]d\w*|bhn\s*ch[o0]d\w*|bsdk|bsdke|bkl|bhosd\w*|"
+    r"bhosr\w*|ch[uo]tiy\w*|chut\b|chutmar\w*|l[ou]nd\w*|lauda|loda|gaand\w*|gandu|randi\w*|raand\w*|bhadw\w*|harami\w*|"
+    r"kamin[ae]|kutt[ae]|kutiya|mkc|tmkc|mc|bc|teri\s+m[au]a|tere\s+baap|maa\s+ki|behen\s+ki|bhen\s+ki|chod\s*u|"
+    r"fuck\w*|f\*+k|motherfuck\w*|bitch|asshole|bastard|dickhead|slut|whore|cunt)\b", re.I)
+_PARTING = ["bye", "pagal h kya", "bhaag yaha se", "bye bye", "tameez se baat kr"]
+
+
+async def _abuse_exit(bot: Bot, s: AISession) -> None:
+    """A real stranger does not lecture: she may say one short line, then leaves."""
+    try:
+        for t in (s.reply_task, s.opener_task):
+            if t and not t.done():
+                t.cancel()
+        s.pending.clear()
+        await asyncio.sleep(random.uniform(1.2, 3.0))
+        if _sessions.get(s.uid) is not s or not store.is_ai(store.partner_of(s.uid)):
+            return
+        if random.random() < 0.5:
+            try:
+                await bot.send_message(s.uid, random.choice(_PARTING))
+            except (TelegramForbiddenError, TelegramBadRequest):
+                pass
+            await asyncio.sleep(random.uniform(0.8, 1.8))
+            if _sessions.get(s.uid) is not s:
+                return
+        await _disconnect_ai(bot, s.uid, 0.1)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception("abuse exit err")
+
+
 async def handle_user_message(bot: Bot, uid: int, text: str, reply_quote: str | None = None, msg_id: int | None = None) -> None:
     s = _sessions.get(uid)
     if not s:
@@ -306,6 +339,9 @@ async def handle_user_message(bot: Bot, uid: int, text: str, reply_quote: str | 
         s.opener_task.cancel()
     msg = text.strip()
     if not msg:
+        return
+    if _ABUSE_RE.search(msg):
+        asyncio.create_task(_abuse_exit(bot, s))
         return
 
     is_m, is_f = bool(_M_RE.match(msg)), bool(_F_RE.match(msg))
@@ -419,7 +455,7 @@ _BAD_PHRASES = re.compile(
     r"how can i (help|assist)|assist you|can i help you|how may i|as an ai|language model|i am an ai|i'm an ai|"
     r"virtual assistant|ai assistant|feel free|chatbot|telegram bot|openai|gemini|groq|\bllm\b|\bprompt\b|"
     r"system message|persona|\buser\b|stranger bot|i cannot|i can't assist|i'm sorry, but|my purpose|tell me more about yourself|"
-    r"is there anything|what would you like to (talk|discuss)|how can i make your",
+    r"is there anything|what would you like to (talk|discuss)|how can i make your|respectful|inappropriate|let'?s keep|not appropriate",
     re.I,
 )
 _LEADING_TAGS = re.compile(
@@ -528,8 +564,10 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
     """Return a safe reply, LEAVE, or "" if the text is not usable."""
     if not t:
         return ""
+    if re.fullmatch(r"[\s\W]*leave[\s\W]*", t, re.I):
+        return LEAVE if (_RUDE_RE.search(user_msg or "") or _ABUSE_RE.search(user_msg or "")) else ""
     if "[leave]" in t.lower():
-        if _RUDE_RE.search(user_msg or ""):
+        if _RUDE_RE.search(user_msg or "") or _ABUSE_RE.search(user_msg or ""):
             return LEAVE
         log.info("Ignored [leave] from model, user was not rude: %r", t[:80])
         return ""
