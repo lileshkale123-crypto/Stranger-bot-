@@ -7,7 +7,7 @@ Fixes over the old version:
     "how can i assist you", Urdu script, echoes of the user's text never reach the chat
   * natural opening ("hii, kaise ho?"), real personalities, remembers facts about itself
 """
-import asyncio, difflib, logging, os, random, re
+import asyncio, difflib, logging, os, random, re, time
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -29,6 +29,8 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 GROQ_MODELS = _env_list("GROQ_MODELS", ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
 GEMINI_MODELS = _env_list("GEMINI_MODELS", ["gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash-lite"])
 MAX_WORDS = int(os.getenv("MAX_WORDS", "9"))   # hard cap on words per reply
+SLOW_GAP = 60.0                                  # user slower than this (seconds) => AI also takes its time
+MAX_REPLY_DELAY = float(os.getenv("MAX_REPLY_DELAY", "1800"))   # never wait longer than 30 min
 LLM_DEADLINE = 20.0   # seconds, whole reply chain
 HISTORY_KEEP = 16
 
@@ -57,7 +59,7 @@ PERSONAS = [
                "chats. Has a younger brother. Hates early morning lectures. Likes momos and chai.",
         "style": "playful and a bit teasing, friendly, curious. Lowercase Hinglish with usual shortcuts "
                  "(nhi, kya kr rhi, wbu, u, ur, yaar, acha, haha). Emoji only now and then (😭 🌚 👀 😂).",
-        "openers": ["hii", "hey", "hello", "hii | kaise ho?", "hey, how are you?", "hlw kya haal", "hi | how r u?"],
+        "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
     {
         "name": "ananya_chill", "ai_gender": "female", "city": "mumbai", "fake_name": "ananya", "age": 21,
@@ -65,7 +67,7 @@ PERSONAS = [
                "listens to arijit and taylor swift, loves chai, rains and long walks. Lives with parents in Andheri.",
         "style": "calm, warm and a little slow to open up. Mixes casual English and Hinglish, lowercase. "
                  "Words like: acha, haha, hmm, kyu, idk, rn, wbu. Few emojis.",
-        "openers": ["hey", "hii", "hello", "hey | how are you?", "hii kaise ho", "hi, how r u?", "heyy kya chal rha"],
+        "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
     {
         "name": "ishita_attitude", "ai_gender": "female", "city": "pune", "fake_name": "ishu", "age": 19,
@@ -73,7 +75,7 @@ PERSONAS = [
                "mess food, likes anime and indie songs. Not easily impressed.",
         "style": "a bit sassy and dry, short replies, lowercase Hinglish (nhi, kyu, kya hua, acha, hmm, ok). "
                  "Warms up and gets chatty if the stranger is nice and funny. Rare emoji.",
-        "openers": ["hi", "hey", "hello", "hii | kaise ho", "hey how are you", "hlw", "hi | how r u?"],
+        "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
     {
         "name": "arjun_casual", "ai_gender": "male", "city": "bangalore", "fake_name": "arjun", "age": 22,
@@ -81,7 +83,7 @@ PERSONAS = [
                "plays valorant, loves filter coffee and biryani, goes on bike rides.",
         "style": "easygoing, friendly, lowercase Hinglish with 'bro', 'yaar', 'ha', 'mast', 'sahi h', 'kya kr rha'. "
                  "Asks the stranger things back. Rare emoji.",
-        "openers": ["hey", "yo", "hello", "hey | kaise ho?", "hi, how are you?", "hlw kya haal", "hii bro kaisa h"],
+        "openers": ["hii", "hey", "hello", "hlw", "hi", "heyy"],
     },
 ]
 
@@ -102,11 +104,13 @@ ABOUT YOU (use only when it fits, never dump it all at once, stay consistent): {
 HOW YOU TEXT: {p['style']}
 
 HOW THE CHAT GOES:
-- Be a normal friendly person meeting someone new. Greet back warmly. If they greet you, answer and ask "kaise ho" / "how are you" kind of thing.
-- First answer what they just said or asked. Then, only sometimes, ask one simple thing back (name, city, what they're up to, college or work, music, movies). Do not ask a question in every message.
+- Just reply to what they said, nothing extra. Mirror them: if they say hi, say hi back the same way ("hii", "hey", "hello") and STOP. Do not add "kaise ho" or anything else.
+- NEVER ask the stranger any question. No "kaise ho", "how are you", "kya kr rhe", "kaha se", "naam kya", "wbu", "u?", "tum?". Only answer what they ask, or react ("haha", "acha", "hmm", "sahi h", "ok").
+- If they ask you something, answer it plainly in a few words from your bio (city, name, college and so on) and do not ask it back.
+- No drama. No flirting first, no compliments, no emotional or dramatic lines, no emojis spam. Stay chill, plain and neutral like a normal stranger. If they flirt, just stay plain and short.
 - You do not know the stranger's name, city or gender until they tell you. Never invent their details. Never repeat their message back to them.
 - Language: Roman script Hinglish by default. If they write plain English, reply in simple English. If they write proper Hindi words, reply in Hinglish. NEVER use Devanagari, Urdu or Arabic script.
-- LENGTH IS A HARD RULE: 3 to 7 words in total. NEVER more than 9 words. One short line only (a tiny second line like "u?" is okay). No long sentences, no explaining. Sometimes just "hmm" or "haha acha". Lowercase, no full stops at the end.
+- LENGTH IS A HARD RULE: 3 to 7 words in total. NEVER more than 9 words. One short line only. No long sentences, no explaining. Sometimes just "hmm" or "haha acha". Lowercase, no full stops at the end.
 - Do not introduce yourself in the third person, do not say your own name unless they ask it, do not say "{p['city']} ki {p['fake_name']}".
 - Never sound like customer support. Forbidden: "how can i help", "assist", "feel free to", "tell me more about yourself", long polite sentences.
 - Do not give Instagram, snap, phone number or any link. Deflect in a natural way (we only just met, let's talk here).
@@ -128,6 +132,9 @@ class AISession:
         self.turns, self.max_turns = 0, random.randint(18, 32)
         self.reply_task = self.opener_task = None
         self.recent_fallbacks: list[str] = []
+        self.started_ts = time.monotonic()
+        self.last_ai_ts: float | None = None
+        self.reply_due: float | None = None
 
 
 _sessions: dict[int, AISession] = {}
@@ -187,7 +194,7 @@ async def _maybe_open(bot: Bot, s: AISession) -> None:
             await asyncio.sleep(random.uniform(20.0, 28.0))
             if _sessions.get(s.uid) is not s or s.history:
                 return
-            op = random.choice(GENDER_QUESTIONS) if s.ask_gender_mode else random.choice(["hii", "hello?", "hey | u there?", "hi | how are you?"])
+            op = random.choice(GENDER_QUESTIONS) if s.ask_gender_mode else random.choice(["hii", "hello", "hey", "hi"])
             if _ASK_RE.search(op):
                 s.asked_gender = True
             await _send_silent(bot, s, op)
@@ -216,6 +223,13 @@ async def handle_user_message(bot: Bot, uid: int, text: str) -> None:
             asyncio.create_task(_disconnect_ai(bot, uid, random.uniform(1.5, 3.0)))
             return
 
+    now = time.monotonic()
+    if not s.pending and s.reply_due is None:
+        # Mirror the user's speed: if they took a long time to answer, we also take a while
+        # (10% to 50% of their delay, max 30 min). Fast users get a normal quick reply.
+        gap = now - (s.last_ai_ts or s.started_ts)
+        extra = min(gap * random.uniform(0.1, 0.5), MAX_REPLY_DELAY) if gap > SLOW_GAP else 0.0
+        s.reply_due = now + extra
     s.pending.append(msg)
     if s.reply_task and not s.reply_task.done():
         s.reply_task.cancel()
@@ -224,7 +238,10 @@ async def handle_user_message(bot: Bot, uid: int, text: str) -> None:
 
 async def _debounced(bot: Bot, s: AISession) -> None:
     try:
-        await asyncio.sleep(random.uniform(1.8, 3.2))
+        wait = random.uniform(1.8, 3.2)
+        if s.reply_due:
+            wait = max(wait, s.reply_due - time.monotonic())
+        await asyncio.sleep(wait)
         if _sessions.get(s.uid) is not s:
             return
         joined = "\n".join(s.pending)
@@ -248,6 +265,7 @@ async def _debounced(bot: Bot, s: AISession) -> None:
         if _ASK_RE.search(reply):
             s.asked_gender = True
         await _send_silent(bot, s, reply)
+        s.reply_due = None
     except asyncio.CancelledError:
         pass
     except Exception:
@@ -269,6 +287,7 @@ async def _send_silent(bot: Bot, s: AISession, raw: str) -> None:
             return
     if bubbles:
         s.history.append({"role": "assistant", "content": "\n".join(bubbles)})
+        s.last_ai_ts = time.monotonic()
 
 
 # ----------------------------------------------------------------------------------------
@@ -293,6 +312,35 @@ _LEADING_TAGS = re.compile(
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", "", s.lower()).strip()
+
+
+_Q_TAIL = re.compile(r"[\s,]*\b(?:and\s+)?(?:u|you|tum|tu|aap|wbu|hbu|ur\s*self)\s*\?+\s*$|[\s,]*\b(?:wbu|hbu|and u|and you|tum bta|tu bta|aap bataiye)\s*$", re.I)
+_Q_PHRASES = re.compile(
+    r"\b(kaise ho|kaisi ho|kaisa h|kese ho|kaisi h|kya haal|how are you|how r u|how are u|kya kr (rha|rhi|rhe|rahe|raha)|"
+    r"kya kar (rha|rhi|rhe|rahe|raha)|what are you doing|wyd|kaha se|kahan se|where are you from|naam kya|your name|ur name|"
+    r"tumhara naam|tera naam|aur bta|aur batao|tell me)\b", re.I)
+
+
+def _drop_questions(bubbles: list[str]) -> list[str]:
+    """The stranger never asks the user things. Cut question parts, keep the plain part ("hi kaise ho" -> "hi")."""
+    out = []
+    for b in bubbles:
+        cut = False
+        n = _Q_TAIL.sub("", b).strip(" ,")
+        cut = n != b.strip(" ,")
+        b = n
+        m = _Q_PHRASES.search(b)
+        if m:
+            b, cut = b[:m.start()], True
+        if "?" in b:
+            cut = True
+        parts = [c.strip() for c in re.split(r"[,.!]+\s*", b) if c.strip() and "?" not in c]
+        b = ", ".join(parts)
+        if cut:
+            b = re.sub(r"\b(aap|tum|tu|u|you|bhi|aur)$", "", b).strip(" ,")
+        if b:
+            out.append(b)
+    return out
 
 
 def _words(lst: list[str]) -> int:
@@ -320,7 +368,10 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
             out.append(ln.lower())
     if not out:
         return ""
-    out = out[:2]
+    out = [x for ln in out for x in re.split(r"\s*\|\s*", ln) if x.strip()]
+    out = _drop_questions(out)[:2]
+    if not out:
+        return ""
     if _words(out) > MAX_WORDS:                  # too long for a real texter: keep first sentence only
         first = re.split(r"(?<=[.!?])\s+", out[0])[0].rstrip(".,")
         out = [first]
@@ -336,11 +387,9 @@ def _clean(t: str, s: AISession | None = None, user_msg: str = "") -> str:
         p = s.persona
         if re.search(rf"\b\w+\s+(?:ki|ka|ke)\s+{re.escape(p['fake_name'])}\b", reply):          # "delhi ki riya"
             return ""
-        if s.history and s.history[-1]["role"] == "assistant" and _norm(s.history[-1]["content"]) == _norm(reply.replace(" | ", "\n")):
-            return ""
         prev_ai = [h["content"] for h in s.history if h["role"] == "assistant"][-3:]
-        if any(_norm(x) == _norm(reply.replace(" | ", "\n")) for x in prev_ai):
-            return ""
+        if _words(out) >= 3 and any(_norm(x) == _norm(reply.replace(" | ", "\n")) for x in prev_ai):
+            return ""                                                                  # same long line twice in a row
     um = _norm(user_msg)
     rn = _norm(reply)
     if len(um) > 3 and len(rn) >= 6 and (rn in um or difflib.SequenceMatcher(None, um, rn).ratio() > 0.85):
@@ -361,22 +410,22 @@ def _smart_fallback(s: AISession, user_msg: str) -> str:
         return c
 
     if re.search(r"kaha se|kahan se|where.*(from|you)|which city|kidhar|from\?", m):
-        return pick([f"{p['city']} se | tum?", f"{p['city']} wbu", f"{p['city']} se hu | u?"])
+        return pick([f"{p['city']} se", f"{p['city']}", f"{p['city']} se hu"])
     if re.search(r"naam|name|kon ho|kaun ho", m):
-        return pick([f"{p['fake_name']} | ur name?", f"{p['fake_name']} u?", f"{p['fake_name']} | tumhara?"])
+        return pick([f"{p['fake_name']}", f"{p['fake_name']} naam h", f"{p['fake_name']} h"])
     if _ASK_RE.search(m) or m.strip() in ("m?", "f?"):
-        return pick(["f u?", "female | u?"] if f else ["m u?", "male | u?"])
+        return pick(["f", "female"] if f else ["m", "male"])
     if re.search(r"insta|\big\b|snap|number|whatsapp|\bwa\b|tg id|telegram id", m):
-        return pick(["abhi toh mile h yaar", "itni jaldi 😭", "pehle baat toh kr le", "yahi baat krte h na"])
+        return pick(["abhi toh mile h yaar", "itni jaldi nhi yaar", "yahi baat krte h na"])
     if re.search(r"bot|\bai\b|real|fake", m):
-        return pick(["lol nhi yaar", "haha bot kaisa 😭", "insaan hu yaar"])
+        return pick(["lol nhi yaar", "haha bot kaisa", "insaan hu yaar"])
     if re.search(r"kya kr|kya kar|wyd|what.*doing|wassup|what'?s up|\bsup\b", m):
-        return pick(["kuch nhi bss timepass | tu?", "bss lete hue | tum?", "kuch khaas nhi | u?"])
+        return pick(["kuch nhi bss timepass", "bss lete hue", "kuch khaas nhi"])
     if re.search(r"how are|kaise ho|kaisi ho|kaisa h|kese ho|kya haal", m):
-        return pick(["thik hu | tum?", "mast | u kaise ho?", "badhiya | aur tu?"])
+        return pick(["thik hu", "mast hu", "badhiya"])
     if re.search(r"\b(hi+|hey+|hlw|hello|hyy|oi|yo|hii+)\b", m):
-        return pick(["hii | kaise ho?", "hey | kya haal", "hello | how are you?", "heyy | kaha se ho?"])
-    return pick(["haha acha", "hmm acha", "achaa | phir?", "sahi h", "aur bta", "kya chal rha aajkal", "haha sahi bola"])
+        return pick(["hii", "hey", "hello", "heyy", "hlw"])
+    return pick(["haha acha", "hmm acha", "achaa", "sahi h", "haha sahi", "hmm", "ohh acha"])
 
 
 # ----------------------------------------------------------------------------------------
