@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS ai_chats (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ai_chats_created_idx ON ai_chats (created_at);
+
+CREATE TABLE IF NOT EXISTS bot_state (
+    key        TEXT PRIMARY KEY,
+    boot_id    TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 # Only these columns may be changed through set_field (prevents SQL injection)
@@ -352,3 +359,30 @@ async def ai_chat_stats() -> dict:
     d = dict(row)
     d["avg_sec"], d["avg_msgs"] = float(d["avg_sec"]), float(d["avg_msgs"])
     return d
+
+
+# ---------------------------------------------------------------- live state (survives redeploys)
+
+async def load_state() -> tuple[str, float] | None:
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            "SELECT data, EXTRACT(EPOCH FROM now() - updated_at)::float8 AS age FROM bot_state WHERE key = 'main'"
+        )
+    return (row["data"], row["age"]) if row else None
+
+
+async def save_state(boot_id: str, data: str, takeover: bool = False) -> bool:
+    async with pool.acquire() as con:
+        if takeover:
+            await con.execute(
+                """
+                INSERT INTO bot_state (key, boot_id, data) VALUES ('main', $1, $2)
+                ON CONFLICT (key) DO UPDATE SET boot_id = $1, data = $2, updated_at = now()
+                """,
+                boot_id, data,
+            )
+            return True
+        return bool(await con.fetchval(
+            "UPDATE bot_state SET data = $2, updated_at = now() WHERE key = 'main' AND boot_id = $1 RETURNING TRUE",
+            boot_id, data,
+        ))

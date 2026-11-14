@@ -10,6 +10,7 @@ import admin
 import chat
 import db
 import onboarding
+import persist
 import premium
 import profile
 import referral
@@ -36,6 +37,19 @@ async def notify_restart(bot: Bot) -> None:
         except Exception:
             pass
         await asyncio.sleep(0.05)  # stay well under Telegram's broadcast limits
+
+
+async def _persist_loop(dp: Dispatcher) -> None:
+    """Saves live chats every few seconds. If a newer deployment took over, step aside."""
+    while True:
+        await asyncio.sleep(persist.INTERVAL)
+        if not await persist.save():
+            log.warning("A newer deployment took over, stopping this one")
+            try:
+                await dp.stop_polling()
+            except Exception:
+                pass
+            return
 
 
 async def main() -> None:
@@ -71,11 +85,14 @@ async def main() -> None:
         ]
     )
 
+    await persist.restore(bot)
+    saver = asyncio.create_task(_persist_loop(dp))
     try:
         log.info("Bot starting (long polling)")
         await dp.start_polling(bot)
     finally:
-        await notify_restart(bot)
+        saver.cancel()
+        await persist.save()
         await db.close_db()
         await bot.session.close()
         log.info("Bot stopped")

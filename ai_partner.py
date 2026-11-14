@@ -804,3 +804,40 @@ async def _llm(s: AISession, last_user_msg: str) -> str:
 
     log.warning("All AI models failed, using fallback reply")
     return _smart_fallback(s, last_user_msg)
+
+
+# ----------------------------------------------------------------------------------------
+# Save / restore AI sessions (so a redeploy does not end the chat)
+# ----------------------------------------------------------------------------------------
+def dump_session(s: AISession) -> dict:
+    now = time.monotonic()
+    return {
+        "uid": s.uid, "gender": s.gender, "want": s.want, "persona": s.persona,
+        "ask_gender_mode": s.ask_gender_mode, "history": s.history, "pending": s.pending,
+        "asked_gender": s.asked_gender, "turns": s.turns, "max_turns": s.max_turns,
+        "recent_fallbacks": s.recent_fallbacks, "pending_ids": s.pending_ids, "replied": s.replied,
+        "facts": s.facts, "last_q_turn": s.last_q_turn, "asked_kinds": sorted(s.asked_kinds),
+        "pending_q": s.pending_q,
+        "age": now - s.started_ts,
+        "last_ai_ago": (now - s.last_ai_ts) if s.last_ai_ts else None,
+        "reply_in": max(0.0, s.reply_due - now) if s.reply_due else None,
+    }
+
+
+def restore_sessions(bot: Bot, items: list[dict], downtime: float) -> None:
+    now = time.monotonic()
+    for d in items:
+        s = AISession(d["uid"], d["gender"], d["want"], d["persona"], d["ask_gender_mode"])
+        s.history, s.pending = d["history"], d["pending"]
+        s.asked_gender, s.turns, s.max_turns = d["asked_gender"], d["turns"], d["max_turns"]
+        s.recent_fallbacks, s.pending_ids, s.replied = d["recent_fallbacks"], d["pending_ids"], d["replied"]
+        s.facts, s.last_q_turn = d["facts"], d["last_q_turn"]
+        s.asked_kinds, s.pending_q = set(d["asked_kinds"]), d["pending_q"]
+        s.started_ts = now - d["age"] - downtime
+        s.last_ai_ts = (now - d["last_ai_ago"] - downtime) if d["last_ai_ago"] is not None else None
+        s.reply_due = (now + max(0.0, d["reply_in"] - downtime)) if d["reply_in"] is not None else None
+        _sessions[s.uid] = s
+        if s.pending:                                   # user wrote just before the restart: still answer
+            s.reply_task = asyncio.create_task(_debounced(bot, s))
+        elif not s.history:                             # stranger had not said hi yet
+            s.opener_task = asyncio.create_task(_maybe_open(bot, s))

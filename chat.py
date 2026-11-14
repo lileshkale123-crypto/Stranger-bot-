@@ -284,3 +284,11 @@ async def relay(message: Message, bot: Bot) -> None:
     except TelegramBadRequest as e:
         log.warning("copy_message failed: %s", e)
         await message.answer(T.t("send_failed"))
+
+
+def resume_queue(bot: Bot) -> None:
+    """After a restart: people who were still searching get their timers back."""
+    for uid, c in list(store.queue.items()):
+        if c["want"]:
+            _fallbacks[uid] = asyncio.create_task(_fallback(bot, uid))
+        _ai_fallbacks[uid] = asyncio.create_task(_ai_fallback(bot, uid, c["gender"], c["want"]))
